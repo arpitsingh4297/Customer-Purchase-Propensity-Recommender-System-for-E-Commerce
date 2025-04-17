@@ -8,6 +8,7 @@ import joblib
 import time
 import logging
 from datetime import datetime
+import os  # Import the os module for path manipulation
 
 # --- Configuration ---
 PAGE_TITLE = "E-Commerce Analytics Dashboard"
@@ -103,6 +104,32 @@ def load_data():
         st.error(f"Error loading data: {str(e)} - using sample data")
         return _generate_sample_data()
 
+# --- Load Models from Local Files ---
+@st.cache_resource
+def load_model(model_path):
+    """Loads a model from a local pickle file."""
+    try:
+        if os.path.exists(model_path):
+            model = joblib.load(model_path)
+            logger.info(f"Successfully loaded model from {model_path}")
+            return model
+        else:
+            logger.error(f"Model file not found at {model_path}")
+            st.error(f"Model file not found at {model_path}. Please ensure it's in the correct location.")
+            return None
+    except Exception as e:
+        logger.error(f"Error loading model from {model_path}: {e}")
+        st.error(f"Error loading model: {e}")
+        return None
+
+# Define the paths to your model files (assuming they are in the same directory)
+lgbm_model_path = "best_lgbm_model.pkl"
+rf_model_path = "best_rf_model.pkl"
+
+# Load the models
+lgbm_model = load_model(lgbm_model_path)
+rf_model = load_model(rf_model_path)
+
 # --- Helper Functions ---
 def plot_conversion_funnel(data: pd.DataFrame) -> px.funnel:
     """Visualizes the conversion funnel with error handling."""
@@ -154,17 +181,25 @@ def simulate_purchase_prediction(
         user_views = max(0, int(user_views))
         item_views = max(0, int(item_views))
         hour = max(0, min(23, int(hour)))
-        
+
         base_prob = 0.1
         user_factor = min(0.4, user_views / 250)
         item_factor = min(0.3, item_views / 300)
         time_factor = 0.2 * (1 - abs(hour - 15) / 12)  # Peaks around 3pm
 
-        if model_type == "LightGBM":
-            return min(0.95, base_prob + user_factor + item_factor + time_factor + 0.05)
-        elif model_type == "Random Forest":
-            return min(0.95, base_prob + user_factor + item_factor + time_factor)
-        else:  # Logistic Regression
+        if model_type == "LightGBM" and lgbm_model is not None:
+            # Replace this with actual prediction using lgbm_model
+            features = np.array([[user_views, item_views, hour]])
+            # Assuming your LightGBM model has a predict_proba method
+            proba = lgbm_model.predict_proba(features)
+            return proba[0][1] if proba is not None else 0.0
+        elif model_type == "Random Forest" and rf_model is not None:
+            # Replace this with actual prediction using rf_model
+            features = np.array([[user_views, item_views, hour]])
+            # Assuming your Random Forest model has a predict_proba method
+            proba = rf_model.predict_proba(features)
+            return proba[0][1] if proba is not None else 0.0
+        else:  # Logistic Regression (simulated)
             return min(0.95, base_prob + 0.8 * (user_factor + item_factor + time_factor))
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
@@ -273,12 +308,12 @@ def _show_conversion_funnel(data: pd.DataFrame):
         st.subheader("Conversion Funnel")
         with st.expander("How to interpret this funnel"):
             st.write("""
-                The conversion funnel shows how users progress through different stages:
-                1. **Views**: Users who viewed products
-                2. **Add-to-Cart**: Users who added items to their cart
-                3. **Purchases**: Users who completed purchases
-                The percentages show the conversion rates between stages.
-            """)
+                    The conversion funnel shows how users progress through different stages:
+                    1. **Views**: Users who viewed products
+                    2. **Add-to-Cart**: Users who added items to their cart
+                    3. **Purchases**: Users who completed purchases
+                    The percentages show the conversion rates between stages.
+                """)
 
         fig = plot_conversion_funnel(data)
         st.plotly_chart(fig, use_container_width=True)
@@ -332,150 +367,243 @@ def show_user_behavior_analysis(data: pd.DataFrame):
         st.error("Could not display user behavior analysis")
 
 def _show_user_engagement(data: pd.DataFrame):
-    """Displays user engagement patterns safely."""
+    """Shows user engagement metrics and visualizations."""
     try:
-        st.subheader("User Engagement Patterns")
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.write("User Activity Distribution")
-            if "user_total_views" in data.columns:
-                fig, ax = plt.subplots()
-                sns.histplot(data["user_total_views"], bins=20, kde=True, ax=ax)
-                ax.set_title("Distribution of User Views")
-                ax.set_xlabel("Total Views per User")
-                st.pyplot(fig)
-            else:
-                st.warning("User view data not available")
-
-        with col2:
-            st.write("Top Active Users")
-            if "visitorid" in data.columns and "user_total_views" in data.columns:
-                top_users = (
-                    data.groupby("visitorid")["user_total_views"]
-                    .max()
-                    .sort_values(ascending=False)
-                    .head(10)
-                )
-                st.dataframe(top_users.reset_index().rename(columns={"user_total_views": "Total Views"}))
-            else:
-                st.warning("User data not available")
-    except:
-        st.warning("Could not display user engagement patterns")
+        st.subheader("User Engagement Metrics")
+        
+        # Calculate engagement metrics
+        if "user_total_views" in data.columns:
+            avg_views_per_user = data.groupby("visitorid")["user_total_views"].mean().mean()
+            active_users = data["visitorid"].nunique()
+        else:
+            avg_views_per_user = 0
+            active_users = 0
+            
+        if "event" in data.columns:
+            cart_add_rate = data[data["event"] == "addtocart"].shape[0] / data.shape[0] if data.shape[0] > 0 else 0
+        else:
+            cart_add_rate = 0
+            
+        # Display metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Active Users", f"{active_users:,}")
+        col2.metric("Avg Views per User", f"{avg_views_per_user:.1f}")
+        col3.metric("Add-to-Cart Rate", f"{cart_add_rate:.1%}")
+        
+        # Show user activity distribution
+        st.subheader("User Activity Distribution")
+        if "user_total_views" in data.columns:
+            fig, ax = plt.subplots(figsize=(10, 4))
+            sns.histplot(data["user_total_views"], bins=30, kde=True, ax=ax)
+            ax.set_title("Distribution of User Views")
+            ax.set_xlabel("Number of Views")
+            ax.set_ylabel("Number of Users")
+            st.pyplot(fig)
+        else:
+            st.warning("User view data not available")
+    except Exception as e:
+        logger.error(f"Error showing user engagement: {str(e)}")
+        st.warning("Could not display user engagement metrics")
 
 def _show_item_popularity(data: pd.DataFrame):
-    """Displays item popularity analysis safely."""
+    """Shows item popularity metrics and visualizations."""
     try:
-        st.subheader("Item Popularity Analysis")
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.write("Most Viewed Items")
-            if "itemid" in data.columns and "item_total_views" in data.columns:
-                top_items = (
-                    data.groupby("itemid")["item_total_views"]
-                    .max()
-                    .sort_values(ascending=False)
-                    .head(10)
-                )
-                st.dataframe(top_items.reset_index().rename(columns={"item_total_views": "Total Views"}))
+        st.subheader("Item Popularity")
+        
+        # Calculate popularity metrics
+        if "itemid" in data.columns:
+            top_items = data["itemid"].value_counts().head(10)
+            popular_categories = data["categoryid"].value_counts().head(5) if "categoryid" in data.columns else pd.Series()
+        else:
+            top_items = pd.Series()
+            popular_categories = pd.Series()
+            
+        # Display in tabs
+        tab1, tab2 = st.tabs(["Top Items", "Categories"])
+        
+        with tab1:
+            if not top_items.empty:
+                st.write("Most viewed items:")
+                fig, ax = plt.subplots(figsize=(10, 4))
+                sns.barplot(x=top_items.values, y=top_items.index.astype(str), palette="rocket", ax=ax)
+                ax.set_title("Top 10 Most Viewed Items")
+                ax.set_xlabel("Number of Views")
+                ax.set_ylabel("Item ID")
+                st.pyplot(fig)
             else:
-                st.warning("Item view data not available")
-
-        with col2:
-            st.write("Best Selling Items")
-            if "itemid" in data.columns and "purchase" in data.columns:
-                best_sellers = data[data["purchase"] == 1]["itemid"].value_counts().head(10)
-                st.dataframe(best_sellers.reset_index().rename(columns={"index": "Item ID", "itemid": "Purchases"}))
+                st.warning("Item data not available")
+                
+        with tab2:
+            if not popular_categories.empty:
+                st.write("Popular categories:")
+                fig, ax = plt.subplots(figsize=(10, 4))
+                sns.barplot(x=popular_categories.values, y=popular_categories.index, palette="mako", ax=ax)
+                ax.set_title("Top 5 Most Popular Categories")
+                ax.set_xlabel("Number of Views")
+                ax.set_ylabel("Category")
+                st.pyplot(fig)
             else:
-                st.warning("Purchase data not available")
-    except:
-        st.warning("Could not display item popularity analysis")
+                st.warning("Category data not available")
+    except Exception as e:
+        logger.error(f"Error showing item popularity: {str(e)}")
+        st.warning("Could not display item popularity metrics")
 
 def show_purchase_predictor():
-    """Displays purchase predictor with error handling."""
+    """Displays the purchase prediction interface."""
     try:
         st.title("🤖 Purchase Probability Predictor")
-        model_option = _select_prediction_model()
-        _show_model_performance(model_option)
-        _predict_purchase_probability(model_option)
-    except:
+        st.write("""
+            This tool predicts the likelihood of a purchase based on user behavior.
+            Adjust the sliders to see how different factors affect purchase probability.
+        """)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            user_views = st.slider("User Total Views", 1, 500, 50, help="Total number of views by this user")
+            item_views = st.slider("Item Total Views", 1, 500, 100, help="Total number of views for this item")
+            
+        with col2:
+            hour = st.slider("Hour of Day", 0, 23, 12, help="Current hour of day (0-23)")
+            model_type = st.selectbox(
+                "Prediction Model",
+                ["LightGBM", "Random Forest", "Logistic Regression"],
+                index=0,
+                help="Select which machine learning model to use for prediction"
+            )
+            
+        # Calculate and display prediction
+        if st.button("Predict Purchase Probability"):
+            with st.spinner("Calculating..."):
+                time.sleep(0.5)  # Simulate processing time
+                probability = simulate_purchase_prediction(user_views, item_views, hour, model_type)
+                
+                st.subheader("Prediction Result")
+                st.metric("Purchase Probability", f"{probability:.1%}")
+                
+                # Visualize with a gauge chart
+                fig = px.indicator(
+                    mode="gauge+number",
+                    value=probability * 100,
+                    title="Purchase Probability",
+                    gauge={
+                        'axis': {'range': [0, 100]},
+                        'steps': [
+                            {'range': [0, 30], 'color': "lightgray"},
+                            {'range': [30, 70], 'color': "yellow"},
+                            {'range': [70, 100], 'color': "green"},
+                        ],
+                        'threshold': {
+                            'line': {'color': "red", 'width': 4},
+                            'thickness': 0.75,
+                            'value': probability * 100
+                        }
+                    }
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Show interpretation
+                with st.expander("Interpretation"):
+                    if probability < 0.3:
+                        st.info("Low purchase probability. Consider offering incentives or recommendations.")
+                    elif probability < 0.7:
+                        st.info("Moderate purchase probability. The user is considering but may need more engagement.")
+                    else:
+                        st.info("High purchase probability. The user is likely to purchase soon.")
+    except Exception as e:
+        logger.error(f"Error in purchase predictor: {str(e)}")
         st.error("Could not display purchase predictor")
 
-def _select_prediction_model() -> str:
-    """Lets the user select the prediction model safely."""
+def show_recommender_system():
+    """Displays the recommender system interface."""
     try:
-        return st.selectbox(
-            "Select Prediction Model",
-            ["LightGBM", "Random Forest", "Logistic Regression"],
-            index=0,
-            help="Choose the machine learning model to use for predictions",
-        )
-    except:
-        return "LightGBM"  # Default if selectbox fails
-
-def _show_model_performance(model_option: str):
-    """Displays model performance metrics safely."""
-    try:
-        st.subheader("Model Performance")
-        col1, col2 = st.columns(2)
-
-        metrics = {
-            "LightGBM": {"ROC AUC Score": "0.89", "Precision-Recall AUC": "0.78"},
-            "Random Forest": {"ROC AUC Score": "0.85", "Precision-Recall AUC": "0.74"},
-            "Logistic Regression": {"ROC AUC Score": "0.82", "Precision-Recall AUC": "0.70"},
-        }
-
-        col1.metric("ROC AUC Score", metrics.get(model_option, {}).get("ROC AUC Score", "N/A"))
-        col2.metric("Precision-Recall AUC", metrics.get(model_option, {}).get("Precision-Recall AUC", "N/A"))
-    except:
-        st.warning("Could not display model performance metrics")
-
-def _predict_purchase_probability(model_option: str):
-    """Provides purchase prediction interface safely."""
-    try:
-        st.subheader("Predict Purchase Probability")
-        st.write("Enter user and item details to predict the likelihood of purchase")
+        st.title("🎯 Personalized Recommendations")
+        st.write("""
+            This system generates personalized product recommendations based on user behavior
+            and popular items in the catalog.
+        """)
         
-        col1, col2 = st.columns(2)
-        with col1:
-            user_views = st.number_input("User Total Views", min_value=0, value=50)
-            hour = st.slider("Hour of Day", 0, 23, 12)
-        with col2:
-            item_views = st.number_input("Item Total Views", min_value=0, value=75)
+        # User input
+        user_id = st.text_input("Enter User ID", "12345", help="Enter a numeric user ID")
+        n_recommendations = st.slider("Number of Recommendations", 1, 10, 5)
         
-        if st.button("Predict Purchase Probability"):
-            prob = simulate_purchase_prediction(user_views, item_views, hour, model_option)
-            st.metric("Predicted Purchase Probability", f"{prob:.1%}")
-    except:
-        st.error("Could not display prediction interface")
+        if st.button("Generate Recommendations"):
+            with st.spinner("Finding the best products for you..."):
+                time.sleep(1)  # Simulate processing time
+                recommendations = generate_recommendations(user_id, n_recommendations)
+                
+                if not recommendations:
+                    st.warning("Could not generate recommendations. Please try again.")
+                    return
+                    
+                st.subheader(f"Top {len(recommendations)} Recommendations for User {user_id}")
+                
+                # Display recommendations in a grid
+                cols = st.columns(3)
+                for i, item_id in enumerate(recommendations):
+                    with cols[i % 3]:
+                        st.image(RECOMMENDATION_IMAGE_PLACEHOLDER, width=150)
+                        st.markdown(f"**Item #{item_id}**")
+                        
+                        # Get item details if available
+                        if "categoryid" in df.columns and "itemid" in df.columns:
+                            category = df[df["itemid"] == item_id]["categoryid"].values[0] if not df[df["itemid"] == item_id].empty else "Unknown"
+                            st.caption(f"Category: {category}")
+                        
+                        st.button("View Details", key=f"btn_{item_id}")
+                        
+                # Show recommendation rationale
+                with st.expander("Why these recommendations?"):
+                    st.write("""
+                        These recommendations are based on:
+                        - Popular items with high conversion rates
+                        - Items frequently viewed together
+                        - Your browsing history (if available)
+                    """)
+    except Exception as e:
+        logger.error(f"Error in recommender system: {str(e)}")
+        st.error("Could not display recommender system")
 
-# --- Main Application ---
-if __name__ == "__main__":
+# --- Main App ---
+def main():
+    # Setup the page
     setup_page()
+    
+    # Load data
+    global df
     df = load_data()
     
+    # Create sidebar and get user selections
     selected_page, date_range = create_sidebar()
     
-    # Apply date filter if available
+    # Filter data based on date range if available
+    filtered_data = df.copy()
     if date_range and len(date_range) == 2 and "timestamp" in df.columns:
-        start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-        df = df[(df["timestamp"] >= start_date) & (df["timestamp"] <= end_date)]
+        start_date = pd.to_datetime(date_range[0])
+        end_date = pd.to_datetime(date_range[1])
+        filtered_data = df[(df["timestamp"] >= start_date) & (df["timestamp"] <= end_date)]
     
+    # Show the selected page
     if selected_page == "📊 Dashboard Overview":
-        show_dashboard_overview(df)
+        show_dashboard_overview(filtered_data)
     elif selected_page == "🔍 User Behavior":
-        show_user_behavior_analysis(df)
+        show_user_behavior_analysis(filtered_data)
     elif selected_page == "🤖 Purchase Predictor":
         show_purchase_predictor()
     elif selected_page == "🎯 Recommender":
-        st.title("🎯 Product Recommender")
-        user_id = st.number_input("Enter User ID", min_value=0, value=100001)
-        if st.button("Generate Recommendations"):
-            recommendations = generate_recommendations(user_id)
-            if recommendations:
-                st.success(f"Top recommendations for user {user_id}:")
-                for i, item in enumerate(recommendations, 1):
-                    st.write(f"{i}. Item ID: {item}")
-            else:
-                st.warning("No recommendations available")
+        show_recommender_system()
+    
+    # Add footer
+    st.markdown("---")
+    st.markdown(
+        f"""
+        <div style="text-align: center; color: gray;">
+            <p>E-Commerce Analytics Dashboard | <a href="{GITHUB_REPO_URL}">GitHub</a> | <a href="{GITHUB_ISSUES_URL}">Report Issues</a></p>
+            <p>Data last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+if __name__ == "__main__":
+    main()
